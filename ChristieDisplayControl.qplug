@@ -17,17 +17,30 @@
 --   * Every command string is editable in Properties ("Show Command Strings") so the
 --     plugin can be matched to your panel's command reference without editing code.
 --   * Setup page has a raw command box and last-reply display for testing.
+--   * Status control for Q-SYS monitoring (managed inventory / Reflect):
+--       OK (0)          connected and replying; routine retries stay OK
+--       Compromised (1) connected but no valid replies (wrong PIN, wrong commands)
+--       Fault (2)       a change could not be confirmed after Max Attempts
+--       Not Present (3) no IP address set
+--       Missing (4)     offline longer than "Offline Alarm Delay"
+--       Initializing (5) starting up, waiting for the first reply
 --
 -- One plugin instance = one display. Drop one per TV.
 
 PluginInfo = {
   Name = "Christie~Display Control (Confirmed Power)",
-  Version = "1.2",
-  BuildVersion = "1.2.0.0",
+  Version = "1.3",
+  BuildVersion = "1.3.0.0",
   Id = "cca9bee8-1824-4521-bcbc-15d1ece0d4f5",
   Author = "",
   Description = "Christie LCD panel control with confirmed power and per-setting force (hold) toggles",
   ShowDebug = true,
+  -- Managed inventory: the display appears in Core Manager > Status > Inventory and in
+  -- Q-SYS Reflect, and changes of the "Status" control are logged as events.
+  Manufacturer = "Christie",
+  Model = "Access Series LCD Panel",
+  IsManaged = true,
+  Type = (Reflect and Reflect.Types and Reflect.Types.Display) or nil,
 }
 
 PageNames = { "Control", "Setup" }
@@ -79,6 +92,7 @@ function GetProperties()
     { Name = "Max Attempts", Type = "integer", Min = 1, Max = 50, Value = 10 },
     { Name = "Inter-Command Delay (ms)", Type = "integer", Min = 0, Max = 2000, Value = 200 },
     { Name = "Confirm Delay (s)", Type = "integer", Min = 0, Max = 30, Value = 2 },
+    { Name = "Offline Alarm Delay (s)", Type = "integer", Min = 0, Max = 600, Value = 30 },
     { Name = "Volume Min", Type = "integer", Min = 0, Max = 100, Value = 0 },
     { Name = "Volume Max", Type = "integer", Min = 1, Max = 100, Value = 100 },
     { Name = "Input List", Type = "string", Value = "HDMI1=7,HDMI2=8,DP=19,DVI=18,VGA=12,OPS=20" },
@@ -225,6 +239,8 @@ if Controls then
   local MAX_ATTEMPTS = P("Max Attempts")
   local GAP          = P("Inter-Command Delay (ms)") / 1000
   local CONFIRM      = P("Confirm Delay (s)")
+  local OFFLINE_DELAY = P("Offline Alarm Delay (s)")
+  local REPLY_TIMEOUT = POLL * 2 + 5
   local DEBUG        = P("Debug Output")
   local VMIN, VMAX   = P("Volume Min"), P("Volume Max")
   local DEFAULT_PIN  = "0000"
@@ -388,6 +404,8 @@ if Controls then
   local connected = false
   local lastRx = nil
   local socketMsg = "Not connected"
+  local offlineSince = os.time()   -- when the link last went down (or first connect attempt)
+  local connectedAt = nil
 
   local queue, pumping = {}, false
 
@@ -420,10 +438,21 @@ if Controls then
     if Controls.Status.String ~= msg then Controls.Status.String = msg end
   end
 
+  -- Status codes: 0 OK, 1 Compromised, 2 Fault, 3 Not Present, 4 Missing, 5 Initializing.
+  -- Monitoring logs every code change, so normal activity (retries, a brief network
+  -- drop) must not change the code; only real problems do.
   local function updateStatus()
     Controls.Connected.Boolean = connected
     if not connected then
-      setStatus(Controls["IP Address"].String == "" and 3 or 4, socketMsg)
+      if trim(Controls["IP Address"].String) == "" then
+        setStatus(3, "No IP address")
+      elseif os.time() - offlineSince < OFFLINE_DELAY then
+        -- Grace period: keep the current code, just update the text
+        local cur = Controls.Status.Value
+        setStatus((cur == 3 or cur == 4) and 5 or cur, socketMsg)
+      else
+        setStatus(4, "Offline: " .. socketMsg)
+      end
       return
     end
     local faults = {}
@@ -434,17 +463,26 @@ if Controls then
       setStatus(2, ("Not confirmed after %d attempts: %s"):format(MAX_ATTEMPTS, table.concat(faults, ", ")))
       return
     end
+    if lastRx == nil or (connectedAt and lastRx < connectedAt) then
+      -- No reply on this connection yet: keep the current code while the display has
+      -- time to answer (so a reconnect doesn't add an extra alert), then flag it.
+      if connectedAt and os.time() - connectedAt <= REPLY_TIMEOUT then
+        setStatus(Controls.Status.Value, "Connected, waiting for reply")
+      else
+        setStatus(1, "Connected, no valid replies - check PIN and command strings")
+      end
+      return
+    elseif os.time() - lastRx > REPLY_TIMEOUT then
+      setStatus(1, ("No valid replies for %d s"):format(os.time() - lastRx))
+      return
+    end
     for _, it in ipairs(items) do
       if actionable(it) and it.attempts > 0 then
         local what = it == power and (it.desired == "on" and "Powering on" or "Going to standby")
           or ("Setting " .. it.label:lower() .. " to " .. tostring(it.desired))
-        setStatus(5, ("%s (attempt %d/%d)"):format(what, it.attempts, MAX_ATTEMPTS))
+        setStatus(0, ("%s (attempt %d/%d)"):format(what, it.attempts, MAX_ATTEMPTS))
         return
       end
-    end
-    if lastRx == nil or os.time() - lastRx > POLL * 2 + 5 then
-      setStatus(1, "Connected, no valid replies - check PIN and command strings")
-      return
     end
     local s = power.actual == "on" and "On" or (power.actual == "off" and "Standby" or "Unknown")
     if awake() then
@@ -637,27 +675,32 @@ if Controls then
       queue = {}
       for _, it in ipairs(items) do it.attempts, it.failed = 0, false end
       currentInterval = nil
-      setStatus(5, "Connected, querying")
+      connectedAt = os.time()
       cycle()
+      Timer.CallAfter(updateStatus, REPLY_TIMEOUT + 1)   -- flag promptly if nothing answers
     elseif evt == TcpSocket.Events.Data then
       local line = s:ReadLine(TcpSocket.EOL.Any)
       while line do
         onLine(line)
         line = s:ReadLine(TcpSocket.EOL.Any)
       end
-    elseif evt == TcpSocket.Events.Reconnect then
-      connected = false
-      socketMsg = "Reconnecting"
-      updateStatus()
     else
+      if connected then offlineSince = os.time() end
       connected = false
-      socketMsg = tostring(evt) .. (err and err ~= "" and (": " .. err) or "")
+      if evt == TcpSocket.Events.Reconnect then
+        socketMsg = "Reconnecting"
+      else
+        socketMsg = tostring(evt) .. (err and err ~= "" and (": " .. err) or "")
+      end
       updateStatus()
+      -- raise "Missing" as soon as the grace period ends if still offline
+      Timer.CallAfter(updateStatus, OFFLINE_DELAY + 1)
     end
   end
 
   local function connect()
     connected = false
+    offlineSince = os.time()
     sock:Disconnect()
     local ip = trim(Controls["IP Address"].String)
     if ip == "" then
@@ -749,6 +792,7 @@ if Controls then
   Controls.Input.Choices = INPUTS
   for it in pairs(FORCE_CTL) do refreshForce(it) end
   Controls["Last Reply"].String = ""
+  setStatus(5, "Starting")
   if trim(Controls.Password.String) == "" then Controls.Password.String = DEFAULT_PIN end
 
   connect()

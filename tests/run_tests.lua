@@ -9,6 +9,8 @@ local SCENARIOS = {
   { "force_toggle", { ["Debug Output"] = true } },
   { "user", { ["Debug Output"] = true } },
   { "pin", { ["Debug Output"] = true } },
+  { "offline", { ["Debug Output"] = true } },
+  { "no_ip", {} },
 }
 
 local failures = 0

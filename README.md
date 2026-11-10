@@ -11,6 +11,7 @@ It confirms every change instead of just sending it. Each command is followed by
 - **Mute is toggle-safe.** `SETMUTE` toggles on these panels, so it's only sent when the plugin knows the current state is wrong. It's never sent again until a fresh reply shows the new state.
 - **Every command string can be edited** in Properties, so you can match other firmware or models without touching code.
 - **Setup page** with a raw command box and the last reply, for testing on site.
+- **Monitoring.** The plugin is a managed device, so each display appears in Core Manager's Inventory and in Q-SYS Reflect with a Status that only changes for real problems (see [Monitoring](#monitoring)).
 
 One plugin instance controls one display.
 
@@ -31,7 +32,7 @@ One plugin instance controls one display.
 |---|---|---|---|
 | Power On / Power Off | Control | Input | Trigger buttons |
 | Power State | Control | Output | LED, lit when the panel reports it's on |
-| Status | Both | Output | OK / compromised / fault / initializing, with text |
+| Status | Both | Output | Q-SYS Status control (OK / Compromised / Fault / Not Present / Missing / Initializing) with text. See [Monitoring](#monitoring) |
 | Volume | Control | Both | Fader, Volume Min to Volume Max |
 | Mute | Control | Both | Toggle |
 | Input | Control | Both | Drop-down list of the Input List names |
@@ -58,6 +59,26 @@ Held values are also applied when the plugin starts, for example after a Core re
 
 The Force toggles and the controls' values are ordinary control values, so set them in Designer before you save and deploy to make them part of the design.
 
+## Monitoring
+
+`PluginInfo` sets `Manufacturer = "Christie"`, `Model = "Access Series LCD Panel"` and `IsManaged = true`. Each plugin instance therefore shows up in **Core Manager > Status > Inventory** and in **Q-SYS Reflect**, and changes to its Status are written to the Event Log. In Designer, the plugin's **Is Managed** property can switch this off per instance.
+
+| Code | Meaning | When |
+|---|---|---|
+| 0 OK | Display is reachable and replying | Normal. Text shows the state, for example `On - HDMI1, vol 20`. Routine retries stay OK, with text like `Powering on (attempt 2/10)` |
+| 1 Compromised | Connected, but the display isn't answering | No valid reply within 2 × Poll Interval + 5 s. Usually a wrong PIN or wrong command strings |
+| 2 Fault | A change couldn't be confirmed | Power, input, volume or mute not confirmed after Max Attempts. Clears once the display confirms (forced settings keep retrying) |
+| 3 Not Present | Not configured | IP Address is blank |
+| 4 Missing | Display offline | No TCP connection for longer than Offline Alarm Delay (default 30 s) |
+| 5 Initializing | Starting up | From plugin start until the first reply |
+
+The Event Log records every change of code, so the plugin avoids changing it for normal activity:
+- **Retries stay OK.** Panels that need a couple of attempts to power on won't raise an alarm every morning.
+- **Short network drops are ignored.** If the link is back within Offline Alarm Delay, the code doesn't change, and only the text says `Reconnecting`.
+- **A real outage logs two events:** Missing when the delay runs out, and OK when it's back.
+
+The Reflect device type is set to `Reflect.Types.Display` when Designer provides it. I couldn't confirm that name in QSC's documentation, so if it isn't available the field is left out. The plugin is still managed and still appears in Inventory. QSC's help says Reflect monitoring needs Q-SYS 8.2 or later and a Reflect subscription; for QSC-authored plugins it also needs a Scripting Engine feature license, and it doesn't say whether third-party plugins need one.
+
 ## Properties
 
 | Property | Default | Notes |
@@ -68,6 +89,7 @@ The Force toggles and the controls' values are ordinary control values, so set t
 | Max Attempts | 10 | After this many, Status shows a fault. Unforced requests are dropped. Forced settings keep retrying once per poll interval |
 | Inter-Command Delay (ms) | 200 | Gap between lines sent to the panel |
 | Confirm Delay (s) | 2 | Wait after a set command before querying |
+| Offline Alarm Delay (s) | 30 | How long the link can be down before Status goes to Missing |
 | Volume Min / Volume Max | 0 / 100 | Volume fader range |
 | Input List | `HDMI1=7,HDMI2=8,DP=19,DVI=18,VGA=12,OPS=20` | `Label=Code` pairs. The label is shown in the drop-down list and matched against `GETSOURCE` replies. The code is sent with `SELECTSOURCE` |
 | Show Command Strings | false | Reveals the command properties below |
@@ -95,7 +117,7 @@ If `GETSOURCE` names an input differently from your label, the plugin can't matc
 
 `tests/` has a simulated Christie panel that answers in the reply formats above. It toggles mute like the real panel, resets audio on wake, and can be made to ignore commands or drop replies. It runs the plugin through these scenarios:
 
-- **power_retry:** the panel ignores the first two power commands, and the plugin confirms on the third attempt.
+- **power_retry:** the panel ignores the first two power commands, and the plugin confirms on the third attempt. Status goes from Initializing to OK at startup and doesn't change during the retries.
 - **power_fail:** the panel never responds. The plugin sends exactly Max Attempts commands, then shows a fault.
 - **forced:** with all three forced (muted, volume 0, HDMI1):
   - They're applied on power-on, even when a mute reply is lost, with exactly one toggle.
@@ -105,6 +127,10 @@ If `GETSOURCE` names an input differently from your label, the plugin can't matc
 - **forced_boot:** held values are applied at startup when the display is already on.
 - **force_toggle:** without Force, the controls follow the display and remote changes are kept. Turning Force Input on holds the current input. Turning it off lets remote changes stand again.
 - **user:** input, volume and mute changes work, including mute retries when the panel ignores the toggle.
+- **offline:**
+  - A 12-second network drop causes no status change.
+  - A 90-second drop stays OK through the 30-second grace period, goes Missing, then returns to OK, logging exactly two status changes.
+- **no_ip:** a blank IP address shows Not Present.
 - **pin:** a wrong PIN is flagged on Status ("check PIN"). Correcting it in the text box recovers immediately, without reconnecting.
 
 Run from the repo root with Lua 5.3 or newer:

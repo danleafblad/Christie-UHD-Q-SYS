@@ -76,13 +76,29 @@ end
 
 TcpSocket = { Events = { Connected = "Connected", Data = "Data", Closed = "Closed", Error = "Error", Timeout = "Timeout", Reconnect = "Reconnect" },
   EOL = { Any = "Any" } }
+local LINK = { sock = nil, down = false }
+-- Drop the network link for `dur` seconds: Closed now, Reconnect attempts every 5 s,
+-- Connected when the link comes back (like a Q-SYS TcpSocket with ReconnectTimeout).
+function linkDown(dur)
+  local s = LINK.sock
+  LINK.down = true
+  s.IsConnected = false
+  s.EventHandler(s, "Closed")
+  local tUp = now + dur
+  local t = now + 5
+  while t < tUp do at(t, function() if LINK.down then s.EventHandler(s, "Reconnect") end end); t = t + 5 end
+  at(tUp, function() LINK.down = false; s.IsConnected = true; s.EventHandler(s, "Connected") end)
+end
+
 function TcpSocket.New()
   local s = { IsConnected = false, buf = "" }
+  LINK.sock = s
   function s:Connect(ip, port)
     at(now + 0.1, function() self.IsConnected = true; self.EventHandler(self, "Connected") end)
   end
   function s:Disconnect() self.IsConnected = false end
   function s:Write(data)
+    if LINK.down then return end
     for line in data:gmatch("(.-)\r\n") do
       panelHandle(line, function(r)
         at(now + 0.05, function() self.buf = self.buf .. r .. "\r\n"; self.EventHandler(self, "Data") end)
@@ -113,6 +129,14 @@ for i = 1, #PageNames do props.page_index.Value = i; local l, g = GetControlLayo
 local ctlDefs = GetControls(props)
 GetPages(props); GetPrettyName(props); GetColor(props)
 
+STATUS_HIST = {}
+-- codes seen in STATUS_HIST from time t0 onward
+function codesSince(t0)
+  local seen = {}
+  for _, h in ipairs(STATUS_HIST) do if h.t >= t0 then seen[#seen + 1] = h.v end end
+  return seen
+end
+
 -- Controls mock
 local function NewControl(def)
   local raw = { Value = 0, String = "", IsDisabled = false, Choices = {} }
@@ -124,7 +148,9 @@ local function NewControl(def)
     end,
     __newindex = function(_, k, v)
       if k == "Boolean" then raw.Value = v and 1 or 0; raw.String = v and "true" or "false"
-      elseif k == "Value" then raw.Value = v; if def.ControlType ~= "Indicator" or def.IndicatorType ~= "Status" then raw.String = tostring(v) end
+      elseif k == "Value" then
+        if def.Name == "Status" and v ~= raw.Value then STATUS_HIST[#STATUS_HIST + 1] = { t = now, v = v } end
+        raw.Value = v; if def.ControlType ~= "Indicator" or def.IndicatorType ~= "Status" then raw.String = tostring(v) end
       else raw[k] = v end
     end,
   })
@@ -167,6 +193,8 @@ if S == "power_retry" then
   press("Power On")
   runUntil(40)
   check("powered on after ignored cmds", panel.standby == false and Controls["Power State"].Boolean)
+  check("startup went Initializing -> OK", STATUS_HIST[1].v == 5 and STATUS_HIST[#STATUS_HIST].v == 0)
+  check("status code unchanged during retries (no monitoring alerts)", #codesSince(2) == 0)
   check("status OK", Controls.Status.Value == 0)
   out[#out+1] = st()
   press("Power Off"); runUntil(60)
@@ -238,6 +266,28 @@ elseif S == "force_toggle" then
   check("Force off: remote change kept and shown", panel.source == "DP" and Controls.Input.String == "DP")
   out[#out+1] = state(); out[#out+1] = st()
   check("status OK", Controls.Status.Value == 0)
+elseif S == "offline" then
+  press("Power On"); runUntil(30)
+  check("OK before drop", Controls.Status.Value == 0)
+  linkDown(12); runUntil(60)
+  check("short drop (12 s) raises no alarm", #codesSince(30) == 0 and Controls.Status.Value == 0)
+  check("connected again", Controls.Connected.Boolean)
+  linkDown(90)          -- t=60 .. 150
+  runUntil(85)
+  check("still OK inside grace period", Controls.Status.Value == 0)
+  runUntil(100)
+  out[#out+1] = st()
+  check("Missing after Offline Alarm Delay", Controls.Status.Value == 4)
+  runUntil(170)
+  out[#out+1] = st()
+  check("back to OK after reconnect", Controls.Status.Value == 0)
+  local c = codesSince(60)
+  check("exactly two alerts for the long drop (Missing, OK)", #c == 2 and c[1] == 4 and c[2] == 0)
+elseif S == "no_ip" then
+  Controls["IP Address"].String = ""
+  Controls["IP Address"].EventHandler(Controls["IP Address"])
+  runUntil(10)
+  check("Not Present when no IP", Controls.Status.Value == 3)
 elseif S == "pin" then
   runUntil(60)
   out[#out+1] = st()
