@@ -21,7 +21,7 @@ One plugin instance controls one display.
 
 1. Copy `ChristieDisplayControl.qplug` to `Documents\QSC\Q-Sys Designer\Plugins`.
 2. Restart Q-SYS Designer. The plugin appears under **Plugins > Christie > Display Control (Confirmed Power)**.
-3. Drag one into the design for each display and set its **IP Address** on the Setup page.
+3. Drag one into the design for each display and set its **IP Address** on the Setup page. If you've changed the panel PIN from `0000`, set **Password** too.
 
 ## Panel setup
 
@@ -44,6 +44,7 @@ One plugin instance controls one display.
 | Power-On Volume | Defaults | Both | Fader. Disabled when volume is forced |
 | Power-On Mute | Defaults | Both | Toggle. Disabled when mute is forced |
 | IP Address | Setup | Input | Changing it reconnects |
+| Password | Setup | Input (pin off by default) | Panel PIN, substituted into the login command. Defaults to `0000` when blank. Changing it logs in again immediately |
 | Connected | Setup | Output | LED |
 | Send Raw / Last Reply | Setup | none | For testing. The login command is sent before the raw command |
 
@@ -68,7 +69,6 @@ If a setting is forced, the forced value wins and the matching default control i
 | Property | Default | Notes |
 |---|---|---|
 | Port | 1986 | |
-| Password | 0000 | Substituted into the login command |
 | Poll Interval (s) | 20 | How often state is checked when nothing is pending |
 | Retry Interval (s) | 6 | Time between attempts while a change is unconfirmed |
 | Max Attempts | 10 | After this many, Status shows a fault. User requests are dropped. Forced settings keep retrying once per poll interval |
@@ -113,6 +113,7 @@ If `GETSOURCE` names an input differently from your label, the plugin can't matc
 - **user:** input, volume and mute changes work, including mute retries when the panel ignores the toggle.
 - **defaults:** defaults are applied on power-on. User changes afterwards are kept across polls. Defaults are applied again after standby and a wake from the remote.
 - **defaults_boot:** defaults aren't applied when the panel is found already on at startup, but pressing Power On applies them.
+- **pin:** a wrong PIN is flagged on Status ("check PIN"). Correcting it in the text box recovers immediately, without reconnecting.
 - **defaults_with_forced_mute:** volume and input defaults apply, and forced mute overrides the mute default.
 
 Run from the repo root with Lua 5.3 or newer:

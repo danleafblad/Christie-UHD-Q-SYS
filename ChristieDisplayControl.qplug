@@ -78,7 +78,6 @@ end
 function GetProperties()
   local p = {
     { Name = "Port", Type = "integer", Min = 1, Max = 65535, Value = 1986 },
-    { Name = "Password", Type = "string", Value = "0000" },
     { Name = "Poll Interval (s)", Type = "integer", Min = 5, Max = 600, Value = 20 },
     { Name = "Retry Interval (s)", Type = "integer", Min = 2, Max = 60, Value = 6 },
     { Name = "Max Attempts", Type = "integer", Min = 1, Max = 50, Value = 10 },
@@ -130,6 +129,7 @@ function GetControls(props)
     { Name = "Mute", ControlType = "Button", ButtonType = "Toggle", Count = 1, UserPin = true, PinStyle = "Both" },
     { Name = "Input", ControlType = "Text", Count = 1, UserPin = true, PinStyle = "Both" },
     { Name = "IP Address", ControlType = "Text", Count = 1, UserPin = true, PinStyle = "Input" },
+    { Name = "Password", ControlType = "Text", Count = 1, UserPin = true, PinStyle = "Input" },
     { Name = "Connected", ControlType = "Indicator", IndicatorType = "Led", Count = 1, UserPin = true, PinStyle = "Output" },
     { Name = "Apply Input On Power-On", ControlType = "Button", ButtonType = "Toggle", Count = 1, UserPin = true, PinStyle = "Both" },
     { Name = "Power-On Input", ControlType = "Text", Count = 1, UserPin = true, PinStyle = "Both" },
@@ -219,7 +219,7 @@ function GetControlLayout(props)
 
   elseif page == "Setup" then
     table.insert(graphics, { Type = "GroupBox", Text = "Connection", Fill = { 235, 235, 235 },
-      StrokeWidth = 1, CornerRadius = 8, HTextAlign = "Left", Position = { 0, 0 }, Size = { 330, 230 } })
+      StrokeWidth = 1, CornerRadius = 8, HTextAlign = "Left", Position = { 0, 0 }, Size = { 330, 245 } })
 
     label("IP Address", 10, 32, 80)
     layout["IP Address"] = { PrettyName = "Setup~IP Address", Style = "Text",
@@ -227,18 +227,22 @@ function GetControlLayout(props)
     layout["Connected"] = { PrettyName = "Setup~Connected", Style = "Led", Color = { 0, 200, 0 },
       Position = { 255, 31 }, Size = { 20, 20 } }
 
-    label("Status", 10, 62, 80)
+    label("PIN", 10, 62, 80)
+    layout["Password"] = { PrettyName = "Setup~Password", Style = "Text",
+      Position = { 95, 60 }, Size = { 150, 22 } }
+
+    label("Status", 10, 92, 80)
     layout["Status"] = { PrettyName = "Status", Style = "Text", FontSize = 11,
-      Position = { 95, 60 }, Size = { 225, 40 } }
+      Position = { 95, 90 }, Size = { 225, 40 } }
 
-    label("Send Raw", 10, 112, 80)
+    label("Send Raw", 10, 142, 80)
     layout["Send Raw"] = { PrettyName = "Setup~Send Raw", Style = "Text",
-      Position = { 95, 110 }, Size = { 225, 22 } }
-    label("(login is sent first automatically)", 95, 134, 225, 16, "Left")
+      Position = { 95, 140 }, Size = { 225, 22 } }
+    label("(login is sent first automatically)", 95, 164, 225, 16, "Left")
 
-    label("Last Reply", 10, 162, 80)
+    label("Last Reply", 10, 192, 80)
     layout["Last Reply"] = { PrettyName = "Setup~Last Reply", Style = "Text",
-      Position = { 95, 160 }, Size = { 225, 40 } }
+      Position = { 95, 190 }, Size = { 225, 40 } }
   end
 
   return layout, graphics
@@ -263,13 +267,30 @@ if Controls then
   local FORCE_MUTE   = AUDIO == "Force Mute" or AUDIO == "Force Mute + Volume Min"
   local FORCE_VOL    = AUDIO == "Force Volume Min" or AUDIO == "Force Mute + Volume Min"
   local FORCE_INPUT  = P("Input Mode") == "Forced"
-  local LOGIN        = P("Login Command"):gsub("{pw}", P("Password"))
+  local DEFAULT_PIN  = "0000"
 
   local function log(...)
     if DEBUG then print(...) end
   end
 
   local function trim(s) return (s:gsub("^%s+", ""):gsub("%s+$", "")) end
+
+  -- Login line built at send time from the Password (PIN) control, so a PIN change
+  -- takes effect immediately. Returns nil when the login command is blank.
+  local function loginCmd()
+    local cmd = trim(P("Login Command"))
+    if cmd == "" then return nil end
+    local pin = trim(Controls.Password.String)
+    return (cmd:gsub("{pw}", function() return pin end))
+  end
+
+  local function withLogin(list)
+    local q = {}
+    local l = loginCmd()
+    if l then q[1] = l end
+    for _, x in ipairs(list) do q[#q + 1] = x end
+    return q
+  end
 
   -- Normalize for comparison: "HDMI 1" == "hdmi1" == "HDMI_1"
   local function norm(v)
@@ -438,7 +459,7 @@ if Controls then
       end
     end
     if lastRx == nil or os.time() - lastRx > POLL * 2 + 5 then
-      setStatus(1, "Connected, no valid replies - check query commands")
+      setStatus(1, "Connected, no valid replies - check PIN and command strings")
       return
     end
     local s = power.actual == "on" and "On" or (power.actual == "off" and "Standby" or "Unknown")
@@ -519,7 +540,7 @@ if Controls then
 
   local function cycle()
     if not connected then updateStatus() return end
-    local q = { LOGIN }
+    local q = withLogin({})
     local sent = false
     for _, it in ipairs(items) do
       if tryItem(it, q) then sent = true end
@@ -536,7 +557,7 @@ if Controls then
   local function actNow(it)
     it.attempts, it.failed = 0, false
     if not connected then updateStatus() return end
-    local q = { LOGIN }
+    local q = withLogin({})
     if tryItem(it, q) and CONFIRM > 0 then q[#q + 1] = CONFIRM end
     q[#q + 1] = it.query
     enqueue(q)
@@ -743,6 +764,13 @@ if Controls then
 
   Controls["IP Address"].EventHandler = connect
 
+  -- New PIN: log in again straight away and re-query everything
+  Controls.Password.EventHandler = function()
+    lastRx = nil
+    for _, it in ipairs(items) do it.attempts, it.failed = 0, false end
+    cycle()
+  end
+
   Controls["Send Raw"].EventHandler = function(c)
     local cmd = trim(c.String)
     if cmd == "" then return end
@@ -750,7 +778,7 @@ if Controls then
       Controls["Last Reply"].String = "Not connected"
       return
     end
-    enqueue({ LOGIN, cmd })
+    enqueue(withLogin({ cmd }))
   end
 
   ----------------------------------------------------------------------------------
@@ -770,6 +798,7 @@ if Controls then
   if volume.forced then Controls.Volume.Value = VMIN end
   if input.forced then Controls.Input.String = input.desired end
   Controls["Last Reply"].String = ""
+  if trim(Controls.Password.String) == "" then Controls.Password.String = DEFAULT_PIN end
 
   connect()
 end

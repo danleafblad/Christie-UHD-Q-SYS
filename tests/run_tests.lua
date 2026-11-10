@@ -9,6 +9,7 @@ local SCENARIOS = {
   { "user", { ["Debug Output"] = true } },
   { "defaults", { ["Debug Output"] = true } },
   { "defaults_boot", { ["Debug Output"] = true } },
+  { "pin", { ["Debug Output"] = true } },
   { "defaults_with_forced_mute", { ["Audio Mode"] = "Force Mute", ["Debug Output"] = true } },
 }
 

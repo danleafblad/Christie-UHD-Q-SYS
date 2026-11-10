@@ -148,6 +148,8 @@ if SCENARIO:find("^defaults") then
   Controls["Power-On Mute"].Boolean = true
 end
 
+if SCENARIO == "pin" then Controls.Password.String = "1234" end
+
 chunk() -- runtime part
 
 local function st() return ("status=%d '%s'"):format(Controls.Status.Value, Controls.Status.String) end
@@ -158,7 +160,8 @@ local function check(name, cond) out[#out + 1] = (cond and "PASS " or "FAIL ") .
 
 local S = SCENARIO
 runUntil(2)
-check("connected & polled", Controls.Connected.Boolean and Controls["Power State"].Boolean == (S == "defaults_boot"))
+check("connected & polled", S == "pin" or (Controls.Connected.Boolean and Controls["Power State"].Boolean == (S == "defaults_boot")))
+check("PIN defaults to 0000", S == "pin" or Controls.Password.String == "0000")
 
 if S == "power_retry" then
   panel.ignorePower = 2
@@ -236,6 +239,16 @@ elseif S == "defaults_with_forced_mute" then
   check("volume/input defaults applied", panel.source == "HDMI2" and panel.volume == 15)
   check("forced mute wins over default", panel.mute and panel.toggles == 1)
   check("power-on mute control disabled", Controls["Power-On Mute"].IsDisabled)
+elseif S == "pin" then
+  runUntil(60)
+  out[#out+1] = st()
+  check("wrong PIN: no valid replies flagged", Controls.Status.Value == 1 and Controls.Status.String:find("PIN") ~= nil)
+  check("wrong PIN sent", panel.rx[1] == "SETUSERSECLEVEL ADMIN 1234")
+  setCtl("Password", "String", "0000"); runUntil(65)
+  out[#out+1] = st()
+  check("correct PIN: recovers immediately", Controls.Status.Value == 0 and panel.unlocked)
+  press("Power On"); runUntil(90)
+  check("control works after PIN change", panel.standby == false)
 elseif S == "defaults_boot" then
   runUntil(60)
   out[#out+1] = state(); out[#out+1] = st()
