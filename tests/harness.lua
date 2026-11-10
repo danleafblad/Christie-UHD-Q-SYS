@@ -139,6 +139,15 @@ Properties = props
 function press(name) Controls[name].EventHandler(Controls[name]) end
 function setCtl(name, field, v) Controls[name][field] = v; Controls[name].EventHandler(Controls[name]) end
 
+if SCENARIO == "defaults_boot" then panel.standby = false; panel.volume = 30; panel.source = "VGA" end
+if SCENARIO:find("^defaults") then
+  Controls["Apply Input On Power-On"].Boolean = true
+  Controls["Power-On Input"].String = "HDMI2"
+  Controls["Apply Audio On Power-On"].Boolean = true
+  Controls["Power-On Volume"].Value = 15
+  Controls["Power-On Mute"].Boolean = true
+end
+
 chunk() -- runtime part
 
 local function st() return ("status=%d '%s'"):format(Controls.Status.Value, Controls.Status.String) end
@@ -149,7 +158,7 @@ local function check(name, cond) out[#out + 1] = (cond and "PASS " or "FAIL ") .
 
 local S = SCENARIO
 runUntil(2)
-check("connected & polled", Controls.Connected.Boolean and Controls["Power State"].Boolean == false)
+check("connected & polled", Controls.Connected.Boolean and Controls["Power State"].Boolean == (S == "defaults_boot"))
 
 if S == "power_retry" then
   panel.ignorePower = 2
@@ -203,6 +212,36 @@ elseif S == "user" then
   check("mute off", panel.mute == false and panel.toggles == 2)
   out[#out+1] = state(); out[#out+1] = st()
   check("status OK", Controls.Status.Value == 0)
+elseif S == "defaults" then
+  press("Power On"); runUntil(40)
+  out[#out+1] = state(); out[#out+1] = st()
+  check("defaults applied on power on", panel.source == "HDMI2" and panel.volume == 15 and panel.mute)
+  check("mute toggled once", panel.toggles == 1)
+  -- user changes after power-on are kept (not forced)
+  setCtl("Input", "String", "DP"); setCtl("Mute", "Boolean", false); setCtl("Volume", "Value", 60); runUntil(80)
+  check("user changes kept", panel.source == "DP" and panel.volume == 60 and not panel.mute)
+  runUntil(140)
+  check("still user values after polls", panel.source == "DP" and panel.volume == 60 and not panel.mute)
+  -- standby by plugin, then woken by IR remote (panel resets to VGA/30/unmuted)
+  press("Power Off"); runUntil(170)
+  panel.standby = false; panel.mute, panel.volume, panel.source = false, 30, "VGA"
+  runUntil(230)
+  out[#out+1] = state(); out[#out+1] = st()
+  check("defaults re-applied after remote wake", panel.source == "HDMI2" and panel.volume == 15 and panel.mute)
+  check("status OK", Controls.Status.Value == 0)
+elseif S == "defaults_with_forced_mute" then
+  Controls["Power-On Mute"].Boolean = false   -- would unmute, but mute is forced
+  press("Power On"); runUntil(60)
+  out[#out+1] = state(); out[#out+1] = st()
+  check("volume/input defaults applied", panel.source == "HDMI2" and panel.volume == 15)
+  check("forced mute wins over default", panel.mute and panel.toggles == 1)
+  check("power-on mute control disabled", Controls["Power-On Mute"].IsDisabled)
+elseif S == "defaults_boot" then
+  runUntil(60)
+  out[#out+1] = state(); out[#out+1] = st()
+  check("no defaults when found already on", panel.source == "VGA" and panel.volume == 30 and not panel.mute)
+  press("Power On"); runUntil(100)
+  check("Power On press re-applies defaults", panel.source == "HDMI2" and panel.volume == 15 and panel.mute)
 end
 
 return table.concat(out, "\n") .. "\n--- log tail ---\n" .. table.concat(LOG, "\n", math.max(1, #LOG - 25))

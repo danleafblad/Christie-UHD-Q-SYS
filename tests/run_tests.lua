@@ -7,6 +7,9 @@ local SCENARIOS = {
   { "forced", { ["Audio Mode"] = "Force Mute + Volume Min", ["Input Mode"] = "Forced",
                 ["Forced Input"] = "HDMI1", ["Debug Output"] = true } },
   { "user", { ["Debug Output"] = true } },
+  { "defaults", { ["Debug Output"] = true } },
+  { "defaults_boot", { ["Debug Output"] = true } },
+  { "defaults_with_forced_mute", { ["Audio Mode"] = "Force Mute", ["Debug Output"] = true } },
 }
 
 local failures = 0

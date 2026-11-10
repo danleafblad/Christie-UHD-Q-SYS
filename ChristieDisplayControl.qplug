@@ -13,6 +13,8 @@
 --     or both. Forced settings are re-applied every time the display wakes up and
 --     whenever a poll shows they have drifted.
 --   * Input policy (property): user selectable from a list, or forced to one input.
+--   * Power-on defaults (runtime controls, Defaults page): set input and/or volume+mute
+--     once each time the display turns on; users can change them afterwards.
 --   * Every command string is editable in Properties ("Show Command Strings") so the
 --     plugin can be matched to your panel's command reference without editing code.
 --   * Setup page has a raw command box and last-reply display for testing.
@@ -21,15 +23,15 @@
 
 PluginInfo = {
   Name = "Christie~Display Control (Confirmed Power)",
-  Version = "1.0",
-  BuildVersion = "1.0.0.0",
+  Version = "1.1",
+  BuildVersion = "1.1.0.0",
   Id = "cca9bee8-1824-4521-bcbc-15d1ece0d4f5",
   Author = "",
   Description = "Christie LCD panel control with confirmed power, forced audio and input policies",
   ShowDebug = true,
 }
 
-PageNames = { "Control", "Setup" }
+PageNames = { "Control", "Defaults", "Setup" }
 
 local AUDIO_MODES = { "User Control", "Force Mute", "Force Volume Min", "Force Mute + Volume Min" }
 local INPUT_MODES = { "User Selectable", "Forced" }
@@ -129,6 +131,12 @@ function GetControls(props)
     { Name = "Input", ControlType = "Text", Count = 1, UserPin = true, PinStyle = "Both" },
     { Name = "IP Address", ControlType = "Text", Count = 1, UserPin = true, PinStyle = "Input" },
     { Name = "Connected", ControlType = "Indicator", IndicatorType = "Led", Count = 1, UserPin = true, PinStyle = "Output" },
+    { Name = "Apply Input On Power-On", ControlType = "Button", ButtonType = "Toggle", Count = 1, UserPin = true, PinStyle = "Both" },
+    { Name = "Power-On Input", ControlType = "Text", Count = 1, UserPin = true, PinStyle = "Both" },
+    { Name = "Apply Audio On Power-On", ControlType = "Button", ButtonType = "Toggle", Count = 1, UserPin = true, PinStyle = "Both" },
+    { Name = "Power-On Volume", ControlType = "Knob", ControlUnit = "Integer",
+      Min = props["Volume Min"].Value, Max = props["Volume Max"].Value, Count = 1, UserPin = true, PinStyle = "Both" },
+    { Name = "Power-On Mute", ControlType = "Button", ButtonType = "Toggle", Count = 1, UserPin = true, PinStyle = "Both" },
     { Name = "Send Raw", ControlType = "Text", Count = 1, UserPin = false },
     { Name = "Last Reply", ControlType = "Indicator", IndicatorType = "Text", Count = 1, UserPin = false },
   }
@@ -177,6 +185,37 @@ function GetControlLayout(props)
     if props["Input Mode"].Value == "Forced" then
       label("Forced to " .. props["Forced Input"].Value, 160, 162, 160, 18, "Left")
     end
+
+  elseif page == "Defaults" then
+    local audio = props["Audio Mode"].Value
+    local forceMute = audio == "Force Mute" or audio == "Force Mute + Volume Min"
+    local forceVol = audio == "Force Volume Min" or audio == "Force Mute + Volume Min"
+
+    table.insert(graphics, { Type = "GroupBox", Text = "Power-On Defaults", Fill = { 235, 235, 235 },
+      StrokeWidth = 1, CornerRadius = 8, HTextAlign = "Left", Position = { 0, 0 }, Size = { 330, 250 } })
+
+    layout["Apply Input On Power-On"] = { PrettyName = "Power-On Defaults~Apply Input", Style = "Button",
+      Legend = "Set Input", Color = { 0, 140, 220 }, Position = { 10, 30 }, Size = { 90, 24 } }
+    layout["Power-On Input"] = { PrettyName = "Power-On Defaults~Input", Style = "ComboBox",
+      Position = { 110, 30 }, Size = { 150, 24 } }
+    if props["Input Mode"].Value == "Forced" then
+      label("Input is forced (Properties)", 110, 56, 210, 16, "Left")
+    end
+
+    layout["Apply Audio On Power-On"] = { PrettyName = "Power-On Defaults~Apply Audio", Style = "Button",
+      Legend = "Set Audio", Color = { 0, 140, 220 }, Position = { 10, 80 }, Size = { 90, 24 } }
+    layout["Power-On Mute"] = { PrettyName = "Power-On Defaults~Mute", Style = "Button", Legend = "MUTE",
+      Color = { 220, 0, 0 }, Position = { 110, 80 }, Size = { 70, 24 } }
+    label("Volume", 262, 62, 60, 16, "Center")
+    layout["Power-On Volume"] = { PrettyName = "Power-On Defaults~Volume", Style = "Fader",
+      Position = { 274, 80 }, Size = { 36, 100 } }
+    if forceMute then label("Mute is forced", 110, 106, 150, 16, "Left") end
+    if forceVol then label("Volume is forced", 110, 122, 150, 16, "Left") end
+
+    table.insert(graphics, { Type = "Text", Position = { 10, 150 }, Size = { 250, 90 }, FontSize = 11,
+      HTextAlign = "Left", VTextAlign = "Top",
+      Text = "Applied once each time the display turns on (from standby, by this plugin or the remote) " ..
+             "and whenever Power On is pressed. Users can change input and audio afterwards." })
 
   elseif page == "Setup" then
     table.insert(graphics, { Type = "GroupBox", Text = "Connection", Fill = { 235, 235, 235 },
@@ -506,6 +545,29 @@ if Controls then
   end
 
   ----------------------------------------------------------------------------------
+  -- Power-on defaults: one-shot requests (not forced), so users can change them later
+  ----------------------------------------------------------------------------------
+  local function applyPowerOnDefaults()
+    local function request(it, v)
+      it.desired, it.attempts, it.failed = v, 0, false
+      log("Power-on default: " .. it.label .. " -> " .. tostring(v))
+    end
+    if Controls["Apply Input On Power-On"].Boolean and not input.forced then
+      local v = trim(Controls["Power-On Input"].String)
+      if v ~= "" then request(input, canonicalInput(v)) end
+    end
+    if Controls["Apply Audio On Power-On"].Boolean then
+      if not volume.forced then
+        local v = math.floor(Controls["Power-On Volume"].Value + 0.5)
+        request(volume, math.max(VMIN, math.min(VMAX, v)))
+      end
+      if not mute.forced then
+        request(mute, Controls["Power-On Mute"].Boolean and "on" or "off")
+      end
+    end
+  end
+
+  ----------------------------------------------------------------------------------
   -- Reply parsing
   ----------------------------------------------------------------------------------
   -- Build a pattern that matches a key with optional spaces between letters, so
@@ -559,6 +621,11 @@ if Controls then
     local prev = best.actual
     best.actual = value
 
+    -- Power-on defaults apply on a real standby -> on transition, or when Power On was
+    -- requested (so pressing Power On also "resets" an already-on display). Not on a
+    -- Core restart where the display is simply found already on.
+    local applyDefaults = best == power and value == "on" and (prev == "off" or power.desired == "on")
+
     if best == power and value == "on" and prev ~= "on" then
       -- Display just woke up: forget stale audio/input state and re-arm forced items
       for _, it in ipairs(items) do
@@ -568,6 +635,7 @@ if Controls then
       end
       Timer.CallAfter(cycle, CONFIRM)
     end
+    if applyDefaults then applyPowerOnDefaults() end
 
     if best.desired ~= nil and norm(best.desired) == norm(value) then
       log(best.label .. " confirmed: " .. tostring(value) .. " after " .. best.attempts .. " attempt(s)")
@@ -689,6 +757,12 @@ if Controls then
   -- Init
   ----------------------------------------------------------------------------------
   Controls.Input.Choices = INPUTS
+  Controls["Power-On Input"].Choices = INPUTS
+  Controls["Power-On Input"].IsDisabled = input.forced
+  Controls["Apply Input On Power-On"].IsDisabled = input.forced
+  Controls["Power-On Mute"].IsDisabled = mute.forced
+  Controls["Power-On Volume"].IsDisabled = volume.forced
+  Controls["Apply Audio On Power-On"].IsDisabled = mute.forced and volume.forced
   Controls.Mute.IsDisabled = mute.forced
   Controls.Volume.IsDisabled = volume.forced
   Controls.Input.IsDisabled = input.forced

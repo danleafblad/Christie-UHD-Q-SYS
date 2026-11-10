@@ -9,6 +9,7 @@ It confirms every change instead of just sending it. Each command is followed by
 - **Confirmed power.** Uses `SETQUICKSTANDBY` with a `GETQUICKSTANDBY` check and retries up to a set number of attempts.
 - **Audio policy:** user control, force mute, force volume to minimum, or both.
 - **Input policy:** user selectable from a drop-down list, or forced to one input.
+- **Power-on defaults** (Defaults page): set the input and/or volume and mute once each time the display turns on. Unlike forced settings, users can change them afterwards.
 - **Forced settings come back.** They're applied again every time the panel wakes, and whenever polling shows someone changed them (for example with the IR remote).
 - **Mute is toggle-safe.** `SETMUTE` toggles on these panels, so it's only sent when the plugin knows the current state is wrong. It's never sent again until a fresh reply shows the new state.
 - **Every command string can be edited** in Properties, so you can match other firmware or models without touching code.
@@ -37,9 +38,30 @@ One plugin instance controls one display.
 | Volume | Control | Both | Fader with Volume Min to Volume Max. Disabled when forced |
 | Mute | Control | Both | Toggle. Disabled when forced |
 | Input | Control | Both | Drop-down list. Disabled when forced |
+| Apply Input On Power-On | Defaults | Both | Toggle. Disabled when the input is forced |
+| Power-On Input | Defaults | Both | Drop-down list of the Input List names |
+| Apply Audio On Power-On | Defaults | Both | Toggle. Applies Power-On Volume and Power-On Mute |
+| Power-On Volume | Defaults | Both | Fader. Disabled when volume is forced |
+| Power-On Mute | Defaults | Both | Toggle. Disabled when mute is forced |
 | IP Address | Setup | Input | Changing it reconnects |
 | Connected | Setup | Output | LED |
 | Send Raw / Last Reply | Setup | none | For testing. The login command is sent before the raw command |
+
+## Power-on defaults vs forced settings
+
+| | Forced (Properties) | Power-on defaults (Defaults page) |
+|---|---|---|
+| When applied | Always: at wake, and again whenever it drifts | Once per power-on |
+| Can users change it? | No. Controls are disabled and changes are reverted | Yes, until the next power-on |
+| Set where | Designer properties (needs a redeploy) | Runtime controls, which can be pinned or put on a UCI |
+
+Power-on defaults apply when:
+- the display goes from standby to on, whether the plugin turned it on or someone used the IR remote (the remote case is detected on the next poll);
+- **Power On** is pressed, even if the display is already on. This makes Power On also work as "reset to defaults".
+
+They aren't applied when the plugin starts (for example after a Core reboot) and finds the display already on.
+
+If a setting is forced, the forced value wins and the matching default control is disabled.
 
 ## Properties
 
@@ -89,6 +111,9 @@ If `GETSOURCE` names an input differently from your label, the plugin can't matc
   - They're re-applied after someone changes them with the remote, and after standby and wake.
   - User changes are ignored while forced.
 - **user:** input, volume and mute changes work, including mute retries when the panel ignores the toggle.
+- **defaults:** defaults are applied on power-on. User changes afterwards are kept across polls. Defaults are applied again after standby and a wake from the remote.
+- **defaults_boot:** defaults aren't applied when the panel is found already on at startup, but pressing Power On applies them.
+- **defaults_with_forced_mute:** volume and input defaults apply, and forced mute overrides the mute default.
 
 Run from the repo root with Lua 5.3 or newer:
 
