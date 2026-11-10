@@ -1,0 +1,701 @@
+-- Christie Display Control
+-- Q-SYS plugin for Christie Access series LCD panels (UHD551-L / UHD651-L / UHD751-P /
+-- UHD861-P) controlled over TCP port 1986. Defaults follow Christie technical reference
+-- 020-102554-06 "Access Series LCD Panels External Commands".
+-- Panel requirement: OSD System > Settings > More > Quick Standby must be enabled for
+-- SETQUICKSTANDBY to work.
+--
+-- What it does
+--   * Power on / standby with confirmation: sends the command, queries the state,
+--     and keeps retrying until the display reports the requested state (or gives up
+--     after "Max Attempts" and raises a fault on the Status control).
+--   * Audio policy (property): user control, force mute, force volume to minimum,
+--     or both. Forced settings are re-applied every time the display wakes up and
+--     whenever a poll shows they have drifted.
+--   * Input policy (property): user selectable from a list, or forced to one input.
+--   * Every command string is editable in Properties ("Show Command Strings") so the
+--     plugin can be matched to your panel's command reference without editing code.
+--   * Setup page has a raw command box and last-reply display for testing.
+--
+-- One plugin instance = one display. Drop one per TV.
+
+PluginInfo = {
+  Name = "Christie~Display Control (Confirmed Power)",
+  Version = "1.0",
+  BuildVersion = "1.0.0.0",
+  Id = "cca9bee8-1824-4521-bcbc-15d1ece0d4f5",
+  Author = "",
+  Description = "Christie LCD panel control with confirmed power, forced audio and input policies",
+  ShowDebug = true,
+}
+
+PageNames = { "Control", "Setup" }
+
+local AUDIO_MODES = { "User Control", "Force Mute", "Force Volume Min", "Force Mute + Volume Min" }
+local INPUT_MODES = { "User Selectable", "Forced" }
+
+-- name, default, description; shown only when "Show Command Strings" is true
+local COMMAND_PROPS = {
+  { "Login Command",           "SETUSERSECLEVEL ADMIN {pw}" },
+  { "Power Query",             "GETQUICKSTANDBY" },
+  { "Power On Command",        "SETQUICKSTANDBY off" },
+  { "Power Off Command",       "SETQUICKSTANDBY on" },
+  { "Power Reply Key",         "QUICKSTANDBY" },
+  { "Power Reply Value = On",  "off" },
+  { "Volume Query",            "GETVOLUME" },
+  { "Volume Set Command",      "STV {v}" },
+  { "Volume Reply Key",        "VOLUME" },
+  { "Mute Query",              "GETMUTE" },
+  { "Mute On Command",         "SETMUTE" },
+  { "Mute Off Command",        "SETMUTE" },
+  { "Mute Reply Key",          "MUTE" },
+  { "Mute Reply Value = Muted", "on" },
+  { "Input Query",             "GETSOURCE" },
+  { "Input Set Command",       "SELECTSOURCE {v}" },
+  { "Input Reply Key",         "SOURCE" },
+}
+
+function GetColor(props)
+  return { 200, 30, 45 }
+end
+
+function GetPrettyName(props)
+  return "Christie Display Control v" .. PluginInfo.Version
+end
+
+function GetPages(props)
+  local pages = {}
+  for _, name in ipairs(PageNames) do table.insert(pages, { name = name }) end
+  return pages
+end
+
+function GetModel(props)
+  return {}
+end
+
+function GetProperties()
+  local p = {
+    { Name = "Port", Type = "integer", Min = 1, Max = 65535, Value = 1986 },
+    { Name = "Password", Type = "string", Value = "0000" },
+    { Name = "Poll Interval (s)", Type = "integer", Min = 5, Max = 600, Value = 20 },
+    { Name = "Retry Interval (s)", Type = "integer", Min = 2, Max = 60, Value = 6 },
+    { Name = "Max Attempts", Type = "integer", Min = 1, Max = 50, Value = 10 },
+    { Name = "Inter-Command Delay (ms)", Type = "integer", Min = 0, Max = 2000, Value = 200 },
+    { Name = "Confirm Delay (s)", Type = "integer", Min = 0, Max = 30, Value = 2 },
+    { Name = "Audio Mode", Type = "enum", Choices = AUDIO_MODES, Value = "User Control" },
+    { Name = "Volume Min", Type = "integer", Min = 0, Max = 100, Value = 0 },
+    { Name = "Volume Max", Type = "integer", Min = 1, Max = 100, Value = 100 },
+    { Name = "Input Mode", Type = "enum", Choices = INPUT_MODES, Value = "User Selectable" },
+    { Name = "Input List", Type = "string", Value = "HDMI1=7,HDMI2=8,DP=19,DVI=18,VGA=12,OPS=20" },
+    { Name = "Forced Input", Type = "string", Value = "HDMI1" },
+    { Name = "Show Command Strings", Type = "boolean", Value = false },
+  }
+  for _, c in ipairs(COMMAND_PROPS) do
+    table.insert(p, { Name = c[1], Type = "string", Value = c[2] })
+  end
+  table.insert(p, { Name = "Mute Command Is Toggle", Type = "boolean", Value = true })
+  table.insert(p, { Name = "Debug Output", Type = "boolean", Value = false })
+  return p
+end
+
+function RectifyProperties(props)
+  props["Forced Input"].IsHidden = props["Input Mode"].Value ~= "Forced"
+  local showCmds = props["Show Command Strings"].Value
+  for _, c in ipairs(COMMAND_PROPS) do props[c[1]].IsHidden = not showCmds end
+  props["Mute Command Is Toggle"].IsHidden = not showCmds
+  if props["Volume Max"].Value <= props["Volume Min"].Value then
+    props["Volume Max"].Value = props["Volume Min"].Value + 1
+  end
+  return props
+end
+
+function GetComponents(props)
+  return {}
+end
+
+function GetWiring(props)
+  return {}
+end
+
+function GetControls(props)
+  return {
+    { Name = "Power On", ControlType = "Button", ButtonType = "Trigger", Count = 1, UserPin = true, PinStyle = "Input" },
+    { Name = "Power Off", ControlType = "Button", ButtonType = "Trigger", Count = 1, UserPin = true, PinStyle = "Input" },
+    { Name = "Power State", ControlType = "Indicator", IndicatorType = "Led", Count = 1, UserPin = true, PinStyle = "Output" },
+    { Name = "Status", ControlType = "Indicator", IndicatorType = "Status", Count = 1, UserPin = true, PinStyle = "Output" },
+    { Name = "Volume", ControlType = "Knob", ControlUnit = "Integer",
+      Min = props["Volume Min"].Value, Max = props["Volume Max"].Value, Count = 1, UserPin = true, PinStyle = "Both" },
+    { Name = "Mute", ControlType = "Button", ButtonType = "Toggle", Count = 1, UserPin = true, PinStyle = "Both" },
+    { Name = "Input", ControlType = "Text", Count = 1, UserPin = true, PinStyle = "Both" },
+    { Name = "IP Address", ControlType = "Text", Count = 1, UserPin = true, PinStyle = "Input" },
+    { Name = "Connected", ControlType = "Indicator", IndicatorType = "Led", Count = 1, UserPin = true, PinStyle = "Output" },
+    { Name = "Send Raw", ControlType = "Text", Count = 1, UserPin = false },
+    { Name = "Last Reply", ControlType = "Indicator", IndicatorType = "Text", Count = 1, UserPin = false },
+  }
+end
+
+function GetControlLayout(props)
+  local layout, graphics = {}, {}
+  local page = PageNames[props["page_index"].Value]
+
+  local function label(text, x, y, w, h, align)
+    table.insert(graphics, { Type = "Text", Text = text, Position = { x, y }, Size = { w, h or 18 },
+      FontSize = 12, HTextAlign = align or "Right" })
+  end
+
+  if page == "Control" then
+    table.insert(graphics, { Type = "GroupBox", Text = "Christie Display", Fill = { 235, 235, 235 },
+      StrokeWidth = 1, CornerRadius = 8, HTextAlign = "Left", Position = { 0, 0 }, Size = { 330, 250 } })
+
+    label("Power", 10, 32, 50)
+    layout["Power On"]  = { PrettyName = "Power~On", Style = "Button", Legend = "ON",
+      Position = { 68, 30 }, Size = { 70, 24 } }
+    layout["Power Off"] = { PrettyName = "Power~Off", Style = "Button", Legend = "OFF",
+      Position = { 145, 30 }, Size = { 70, 24 } }
+    layout["Power State"] = { PrettyName = "Power~State", Style = "Led", Color = { 0, 200, 0 },
+      Position = { 225, 32 }, Size = { 20, 20 } }
+    label("Is On", 248, 32, 50, 18, "Left")
+
+    layout["Status"] = { PrettyName = "Status", Style = "Text", FontSize = 11,
+      Position = { 10, 64 }, Size = { 310, 40 } }
+
+    local audio = props["Audio Mode"].Value
+    local forceMute = audio == "Force Mute" or audio == "Force Mute + Volume Min"
+    local forceVol = audio == "Force Volume Min" or audio == "Force Mute + Volume Min"
+
+    label("Volume", 10, 112, 60, 18, "Center")
+    layout["Volume"] = { PrettyName = "Audio~Volume", Style = "Fader",
+      Position = { 22, 132 }, Size = { 36, 100 } }
+    layout["Mute"] = { PrettyName = "Audio~Mute", Style = "Button", Legend = "MUTE", Color = { 220, 0, 0 },
+      Position = { 75, 132 }, Size = { 70, 24 } }
+    if forceVol then label("Vol forced to min", 75, 162, 110, 18, "Left") end
+    if forceMute then label("Mute forced", 75, 180, 110, 18, "Left") end
+
+    label("Input", 160, 112, 160, 18, "Left")
+    layout["Input"] = { PrettyName = "Input~Select", Style = "ComboBox",
+      Position = { 160, 132 }, Size = { 160, 24 } }
+    if props["Input Mode"].Value == "Forced" then
+      label("Forced to " .. props["Forced Input"].Value, 160, 162, 160, 18, "Left")
+    end
+
+  elseif page == "Setup" then
+    table.insert(graphics, { Type = "GroupBox", Text = "Connection", Fill = { 235, 235, 235 },
+      StrokeWidth = 1, CornerRadius = 8, HTextAlign = "Left", Position = { 0, 0 }, Size = { 330, 230 } })
+
+    label("IP Address", 10, 32, 80)
+    layout["IP Address"] = { PrettyName = "Setup~IP Address", Style = "Text",
+      Position = { 95, 30 }, Size = { 150, 22 } }
+    layout["Connected"] = { PrettyName = "Setup~Connected", Style = "Led", Color = { 0, 200, 0 },
+      Position = { 255, 31 }, Size = { 20, 20 } }
+
+    label("Status", 10, 62, 80)
+    layout["Status"] = { PrettyName = "Status", Style = "Text", FontSize = 11,
+      Position = { 95, 60 }, Size = { 225, 40 } }
+
+    label("Send Raw", 10, 112, 80)
+    layout["Send Raw"] = { PrettyName = "Setup~Send Raw", Style = "Text",
+      Position = { 95, 110 }, Size = { 225, 22 } }
+    label("(login is sent first automatically)", 95, 134, 225, 16, "Left")
+
+    label("Last Reply", 10, 162, 80)
+    layout["Last Reply"] = { PrettyName = "Setup~Last Reply", Style = "Text",
+      Position = { 95, 160 }, Size = { 225, 40 } }
+  end
+
+  return layout, graphics
+end
+
+----------------------------------------------------------------------------------------
+-- Runtime
+----------------------------------------------------------------------------------------
+if Controls then
+
+  local P = function(name) return Properties[name].Value end
+
+  local PORT         = P("Port")
+  local POLL         = P("Poll Interval (s)")
+  local RETRY        = P("Retry Interval (s)")
+  local MAX_ATTEMPTS = P("Max Attempts")
+  local GAP          = P("Inter-Command Delay (ms)") / 1000
+  local CONFIRM      = P("Confirm Delay (s)")
+  local DEBUG        = P("Debug Output")
+  local AUDIO        = P("Audio Mode")
+  local VMIN, VMAX   = P("Volume Min"), P("Volume Max")
+  local FORCE_MUTE   = AUDIO == "Force Mute" or AUDIO == "Force Mute + Volume Min"
+  local FORCE_VOL    = AUDIO == "Force Volume Min" or AUDIO == "Force Mute + Volume Min"
+  local FORCE_INPUT  = P("Input Mode") == "Forced"
+  local LOGIN        = P("Login Command"):gsub("{pw}", P("Password"))
+
+  local function log(...)
+    if DEBUG then print(...) end
+  end
+
+  local function trim(s) return (s:gsub("^%s+", ""):gsub("%s+$", "")) end
+
+  -- Normalize for comparison: "HDMI 1" == "hdmi1" == "HDMI_1"
+  local function norm(v)
+    if v == nil then return nil end
+    return (tostring(v):lower():gsub("[%s_%-]", ""))
+  end
+
+  -- "Input List" is "Label=Code,Label=Code". Label is what GETSOURCE reports and what
+  -- the combo box shows; Code is what goes into the set command ({v}). A bare "Label"
+  -- uses the label itself as the code.
+  local INPUTS, INPUT_CODE = {}, {}
+  for item in P("Input List"):gmatch("[^,]+") do
+    local label, code = item:match("^%s*(.-)%s*=%s*(.-)%s*$")
+    if not label then label = trim(item); code = label end
+    if label ~= "" then
+      INPUTS[#INPUTS + 1] = label
+      INPUT_CODE[label] = code
+    end
+  end
+  local FORCED_INPUT = trim(P("Forced Input"))
+
+  local ALIASES = { displayport = "dp" }
+  local function canonicalInput(v)
+    local n = norm(v)
+    n = ALIASES[n] or n
+    for _, label in ipairs(INPUTS) do
+      if norm(label) == n or norm(INPUT_CODE[label]) == n then return label end
+    end
+    return v
+  end
+
+  -- On/off reply values: accept on/off, 1/0, true/false, enable/disable, yes/no
+  local function onOff(word)
+    word = (word or ""):lower()
+    if word == "on" or word == "1" or word == "true" or word == "enable" or word == "enabled" or word == "yes" then
+      return "on"
+    elseif word == "off" or word == "0" or word == "false" or word == "disable" or word == "disabled" or word == "no" then
+      return "off"
+    end
+    return nil
+  end
+
+  ----------------------------------------------------------------------------------
+  -- Managed items. Each has a desired value (nil = nothing requested) and the last
+  -- value the display reported. "forced" items keep their desired value forever.
+  ----------------------------------------------------------------------------------
+  local power = {
+    label = "Power", key = P("Power Reply Key"), query = P("Power Query"), needsAwake = false,
+    setCmd = function(v) return v == "on" and P("Power On Command") or P("Power Off Command") end,
+    parse = function(rest)
+      local w = onOff(rest:match("^(%w+)"))
+      if not w then return nil end
+      return (w == onOff(P("Power Reply Value = On"))) and "on" or "off"
+    end,
+  }
+  local mute = {
+    label = "Mute", key = P("Mute Reply Key"), query = P("Mute Query"), needsAwake = true,
+    setCmd = function(v) return v == "on" and P("Mute On Command") or P("Mute Off Command") end,
+    toggle = P("Mute Command Is Toggle"),
+    parse = function(rest)
+      local w = onOff(rest:match("^(%w+)"))
+      if not w then return nil end
+      return (w == onOff(P("Mute Reply Value = Muted"))) and "on" or "off"
+    end,
+  }
+  local volume = {
+    label = "Volume", key = P("Volume Reply Key"), query = P("Volume Query"), needsAwake = true,
+    setCmd = function(v) return (P("Volume Set Command"):gsub("{v}", tostring(v))) end,
+    parse = function(rest)
+      local n = tonumber(rest:match("(%-?%d+)"))
+      return n and math.floor(n) or nil
+    end,
+  }
+  local input = {
+    label = "Input", key = P("Input Reply Key"), query = P("Input Query"), needsAwake = true,
+    setCmd = function(v)
+      local code = INPUT_CODE[v] or tostring(v)
+      return (P("Input Set Command"):gsub("{v}", code))
+    end,
+    parse = function(rest)
+      rest = trim(rest)
+      if rest == "" then return nil end
+      return canonicalInput(rest)
+    end,
+  }
+
+  local items = { power, mute, volume, input }
+  for _, it in ipairs(items) do
+    it.attempts, it.failed, it.lastTry = 0, false, 0
+    it.forced = false
+  end
+  if FORCE_MUTE then mute.forced, mute.desired = true, "on" end
+  if FORCE_VOL then volume.forced, volume.desired = true, VMIN end
+  if FORCE_INPUT then input.forced, input.desired = true, canonicalInput(FORCED_INPUT) end
+
+  local function pending(it)
+    return it.desired ~= nil and norm(it.desired) ~= norm(it.actual)
+  end
+
+  local function awake() return power.actual == "on" end
+
+  local function actionable(it)
+    return pending(it) and (not it.needsAwake or awake())
+  end
+
+  ----------------------------------------------------------------------------------
+  -- Socket and paced send queue
+  ----------------------------------------------------------------------------------
+  local sock = TcpSocket.New()
+  sock.ReconnectTimeout = 5
+  local connected = false
+  local lastRx = nil
+  local socketMsg = "Not connected"
+
+  local queue, pumping = {}, false
+
+  local function pump()
+    if #queue == 0 then pumping = false return end
+    pumping = true
+    local x = table.remove(queue, 1)
+    if type(x) == "number" then
+      Timer.CallAfter(pump, x)
+      return
+    end
+    if connected then
+      log("TX: " .. x)
+      sock:Write(x .. "\r\n")
+    end
+    Timer.CallAfter(pump, GAP)
+  end
+
+  local function enqueue(list)
+    if #queue > 40 then queue = {} end   -- never let a dead link pile up commands
+    for _, x in ipairs(list) do queue[#queue + 1] = x end
+    if not pumping then pump() end
+  end
+
+  ----------------------------------------------------------------------------------
+  -- Status / feedback
+  ----------------------------------------------------------------------------------
+  local function setStatus(code, msg)
+    if Controls.Status.Value ~= code then Controls.Status.Value = code end
+    if Controls.Status.String ~= msg then Controls.Status.String = msg end
+  end
+
+  local function updateStatus()
+    Controls.Connected.Boolean = connected
+    if not connected then
+      setStatus(Controls["IP Address"].String == "" and 3 or 4, socketMsg)
+      return
+    end
+    local faults = {}
+    for _, it in ipairs(items) do
+      if it.failed then faults[#faults + 1] = it.label end
+    end
+    if #faults > 0 then
+      setStatus(2, ("Not confirmed after %d attempts: %s"):format(MAX_ATTEMPTS, table.concat(faults, ", ")))
+      return
+    end
+    for _, it in ipairs(items) do
+      if actionable(it) and it.attempts > 0 then
+        local what = it == power and (it.desired == "on" and "Powering on" or "Going to standby")
+          or ("Setting " .. it.label:lower() .. " to " .. tostring(it.desired))
+        setStatus(5, ("%s (attempt %d/%d)"):format(what, it.attempts, MAX_ATTEMPTS))
+        return
+      end
+    end
+    if lastRx == nil or os.time() - lastRx > POLL * 2 + 5 then
+      setStatus(1, "Connected, no valid replies - check query commands")
+      return
+    end
+    local s = power.actual == "on" and "On" or (power.actual == "off" and "Standby" or "Unknown")
+    if awake() then
+      local extra = {}
+      if input.actual then extra[#extra + 1] = tostring(input.actual) end
+      if mute.actual == "on" then extra[#extra + 1] = "muted" end
+      if volume.actual then extra[#extra + 1] = "vol " .. volume.actual end
+      if #extra > 0 then s = s .. " - " .. table.concat(extra, ", ") end
+    end
+    setStatus(0, s)
+  end
+
+  local function updateFeedback()
+    Controls["Power State"].Boolean = power.actual == "on"
+    -- Don't move user controls while a user request is still in flight
+    if mute.actual and (mute.forced or mute.desired == nil) then
+      Controls.Mute.Boolean = mute.actual == "on"
+    end
+    if volume.actual and (volume.forced or volume.desired == nil) then
+      Controls.Volume.Value = volume.actual
+    end
+    if input.actual and (input.forced or input.desired == nil) then
+      Controls.Input.String = tostring(input.actual)
+    end
+  end
+
+  ----------------------------------------------------------------------------------
+  -- Polling / retry engine
+  ----------------------------------------------------------------------------------
+  local cycleTimer = Timer.New()
+  local currentInterval = nil
+
+  local function reschedule()
+    local fast = false
+    for _, it in ipairs(items) do
+      if actionable(it) and not it.failed then fast = true end
+    end
+    local interval = fast and RETRY or POLL
+    if interval ~= currentInterval then
+      currentInterval = interval
+      cycleTimer:Stop()
+      cycleTimer:Start(interval)
+    end
+  end
+
+  local function queries()
+    local q = {}
+    for _, it in ipairs(items) do
+      if not it.needsAwake or awake() then q[#q + 1] = it.query end
+    end
+    return q
+  end
+
+  -- Try to (re)apply one item. Returns true if a set command was queued.
+  local function tryItem(it, q)
+    if not actionable(it) then return false end
+    if it.failed then
+      -- Forced settings keep trying slowly after a fault; user requests were dropped.
+      if not (it.forced and os.time() - it.lastTry >= POLL) then return false end
+    elseif it.attempts >= MAX_ATTEMPTS then
+      it.failed = true
+      log(it.label .. " failed after " .. it.attempts .. " attempts")
+      if not it.forced then it.desired = nil end
+      return false
+    end
+    it.attempts = it.attempts + 1
+    it.lastTry = os.time()
+    if it.toggle then
+      -- A toggle command must only be sent when we KNOW the current state is wrong,
+      -- and then never again until a fresh reply tells us the new state.
+      if it.actual == nil then return false end
+      it.actual = nil
+    end
+    q[#q + 1] = it.setCmd(it.desired)
+    return true
+  end
+
+  local function cycle()
+    if not connected then updateStatus() return end
+    local q = { LOGIN }
+    local sent = false
+    for _, it in ipairs(items) do
+      if tryItem(it, q) then sent = true end
+    end
+    if sent and CONFIRM > 0 then q[#q + 1] = CONFIRM end
+    for _, c in ipairs(queries()) do q[#q + 1] = c end
+    enqueue(q)
+    updateStatus()
+    reschedule()
+  end
+  cycleTimer.EventHandler = cycle
+
+  -- Apply a single item right away (user action)
+  local function actNow(it)
+    it.attempts, it.failed = 0, false
+    if not connected then updateStatus() return end
+    local q = { LOGIN }
+    if tryItem(it, q) and CONFIRM > 0 then q[#q + 1] = CONFIRM end
+    q[#q + 1] = it.query
+    enqueue(q)
+    updateStatus()
+    reschedule()
+  end
+
+  ----------------------------------------------------------------------------------
+  -- Reply parsing
+  ----------------------------------------------------------------------------------
+  -- Build a pattern that matches a key with optional spaces between letters, so
+  -- "QUICKSTANDBY" matches "Quick Standby" in "#*Quick Standby is off."
+  local function keyPattern(key)
+    return (key:upper():gsub("%s", ""):gsub("(%W)", "%%%1"):gsub("(%%?.)", "%1%%s*"))
+  end
+  for _, it in ipairs(items) do it.pattern = keyPattern(it.key) end
+
+  -- Strip filler between the key and the value: "is", "level", "=", ":" ...
+  local function cleanRest(rest)
+    local prev
+    repeat
+      prev = rest
+      rest = rest:gsub("^[%s:=,]+", "")
+      local low = rest:lower()
+      for _, w in ipairs({ "is", "level", "set", "to", "status" }) do
+        if low:sub(1, #w) == w and not low:sub(#w + 1, #w + 1):match("%w") then
+          rest = rest:sub(#w + 1)
+          break
+        end
+      end
+    until rest == prev
+    return (rest:gsub("[%.%s]+$", ""))
+  end
+
+  local function onLine(line)
+    line = trim(line)
+    if line == "" then return end
+    log("RX: " .. line)
+    Controls["Last Reply"].String = line
+    local body = line:gsub("^[#%*%s]+", "")            -- replies start with "#*"
+    local upper = body:upper()
+    if upper:find("^SET[%s%u]") then return end         -- "#*Set Quick Standby off" ack / echo
+    if upper:find("^GET") or upper:find("^STV") or upper:find("^SELECTSOURCE") then return end -- echoes
+
+    local best, bestEnd, bestLen = nil, nil, 0
+    for _, it in ipairs(items) do
+      if it.key ~= "" then
+        local s0, e = upper:find(it.pattern)
+        if s0 and #it.key > bestLen then best, bestEnd, bestLen = it, e, #it.key end
+      end
+    end
+    if not best then return end
+
+    local rest = cleanRest(body:sub(bestEnd + 1))
+    local value = best.parse(rest)
+    if value == nil then return end
+    lastRx = os.time()
+
+    local prev = best.actual
+    best.actual = value
+
+    if best == power and value == "on" and prev ~= "on" then
+      -- Display just woke up: forget stale audio/input state and re-arm forced items
+      for _, it in ipairs(items) do
+        if it.needsAwake then
+          it.actual, it.attempts, it.failed = nil, 0, false
+        end
+      end
+      Timer.CallAfter(cycle, CONFIRM)
+    end
+
+    if best.desired ~= nil and norm(best.desired) == norm(value) then
+      log(best.label .. " confirmed: " .. tostring(value) .. " after " .. best.attempts .. " attempt(s)")
+      best.attempts, best.failed = 0, false
+      if not best.forced then best.desired = nil end
+    elseif best.forced and best.desired ~= nil and prev ~= nil and norm(prev) == norm(best.desired) then
+      log(best.label .. " drifted to " .. tostring(value) .. ", re-applying")
+      best.attempts, best.failed = 0, false
+    end
+
+    updateFeedback()
+    updateStatus()
+    reschedule()
+  end
+
+  sock.EventHandler = function(s, evt, err)
+    if evt == TcpSocket.Events.Connected then
+      connected = true
+      socketMsg = "Connected"
+      queue = {}
+      for _, it in ipairs(items) do it.attempts, it.failed = 0, false end
+      currentInterval = nil
+      setStatus(5, "Connected, querying")
+      cycle()
+    elseif evt == TcpSocket.Events.Data then
+      local line = s:ReadLine(TcpSocket.EOL.Any)
+      while line do
+        onLine(line)
+        line = s:ReadLine(TcpSocket.EOL.Any)
+      end
+    elseif evt == TcpSocket.Events.Reconnect then
+      connected = false
+      socketMsg = "Reconnecting"
+      updateStatus()
+    else
+      connected = false
+      socketMsg = tostring(evt) .. (err and err ~= "" and (": " .. err) or "")
+      updateStatus()
+    end
+  end
+
+  local function connect()
+    connected = false
+    sock:Disconnect()
+    local ip = trim(Controls["IP Address"].String)
+    if ip == "" then
+      socketMsg = "No IP address"
+      updateStatus()
+      return
+    end
+    socketMsg = "Connecting to " .. ip .. ":" .. PORT
+    updateStatus()
+    sock:Connect(ip, PORT)
+  end
+
+  ----------------------------------------------------------------------------------
+  -- Control handlers
+  ----------------------------------------------------------------------------------
+  Controls["Power On"].EventHandler = function()
+    power.desired = "on"
+    actNow(power)
+  end
+
+  Controls["Power Off"].EventHandler = function()
+    power.desired = "off"
+    for _, it in ipairs(items) do
+      if it.needsAwake then it.failed = false end
+    end
+    actNow(power)
+  end
+
+  Controls.Mute.EventHandler = function(c)
+    if mute.forced then
+      c.Boolean = true
+      return
+    end
+    mute.desired = c.Boolean and "on" or "off"
+    actNow(mute)
+  end
+
+  local volTimer = Timer.New()
+  volTimer.EventHandler = function()
+    volTimer:Stop()
+    actNow(volume)
+  end
+  Controls.Volume.EventHandler = function(c)
+    if volume.forced then
+      c.Value = VMIN
+      return
+    end
+    volume.desired = math.floor(c.Value + 0.5)
+    volTimer:Stop()
+    volTimer:Start(0.3)   -- debounce fader drags
+  end
+
+  Controls.Input.EventHandler = function(c)
+    if input.forced then
+      c.String = input.desired
+      return
+    end
+    if c.String == "" then return end
+    input.desired = canonicalInput(c.String)
+    actNow(input)
+  end
+
+  Controls["IP Address"].EventHandler = connect
+
+  Controls["Send Raw"].EventHandler = function(c)
+    local cmd = trim(c.String)
+    if cmd == "" then return end
+    if not connected then
+      Controls["Last Reply"].String = "Not connected"
+      return
+    end
+    enqueue({ LOGIN, cmd })
+  end
+
+  ----------------------------------------------------------------------------------
+  -- Init
+  ----------------------------------------------------------------------------------
+  Controls.Input.Choices = INPUTS
+  Controls.Mute.IsDisabled = mute.forced
+  Controls.Volume.IsDisabled = volume.forced
+  Controls.Input.IsDisabled = input.forced
+  if mute.forced then Controls.Mute.Boolean = true end
+  if volume.forced then Controls.Volume.Value = VMIN end
+  if input.forced then Controls.Input.String = input.desired end
+  Controls["Last Reply"].String = ""
+
+  connect()
+end
