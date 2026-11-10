@@ -7,10 +7,7 @@ It confirms every change instead of just sending it. Each command is followed by
 ## Features
 
 - **Confirmed power.** Uses `SETQUICKSTANDBY` with a `GETQUICKSTANDBY` check and retries up to a set number of attempts.
-- **Audio policy:** user control, force mute, force volume to minimum, or both.
-- **Input policy:** user selectable from a drop-down list, or forced to one input.
-- **Power-on defaults** (Defaults page): set the input and/or volume and mute once each time the display turns on. Unlike forced settings, users can change them afterwards.
-- **Forced settings come back.** They're applied again every time the panel wakes, and whenever polling shows someone changed them (for example with the IR remote).
+- **Volume, Mute and Input on one page, each with a Force toggle.** Without Force, the control works normally and shows what the display reports. With Force on, the control's value is held: it's applied whenever the display turns on and put back if someone changes it at the display or with the IR remote.
 - **Mute is toggle-safe.** `SETMUTE` toggles on these panels, so it's only sent when the plugin knows the current state is wrong. It's never sent again until a fresh reply shows the new state.
 - **Every command string can be edited** in Properties, so you can match other firmware or models without touching code.
 - **Setup page** with a raw command box and the last reply, for testing on site.
@@ -35,34 +32,31 @@ One plugin instance controls one display.
 | Power On / Power Off | Control | Input | Trigger buttons |
 | Power State | Control | Output | LED, lit when the panel reports it's on |
 | Status | Both | Output | OK / compromised / fault / initializing, with text |
-| Volume | Control | Both | Fader with Volume Min to Volume Max. Disabled when forced |
-| Mute | Control | Both | Toggle. Disabled when forced |
-| Input | Control | Both | Drop-down list. Disabled when forced |
-| Apply Input On Power-On | Defaults | Both | Toggle. Disabled when the input is forced |
-| Power-On Input | Defaults | Both | Drop-down list of the Input List names |
-| Apply Audio On Power-On | Defaults | Both | Toggle. Applies Power-On Volume and Power-On Mute |
-| Power-On Volume | Defaults | Both | Fader. Disabled when volume is forced |
-| Power-On Mute | Defaults | Both | Toggle. Disabled when mute is forced |
+| Volume | Control | Both | Fader, Volume Min to Volume Max |
+| Mute | Control | Both | Toggle |
+| Input | Control | Both | Drop-down list of the Input List names |
+| Force Volume / Force Mute / Force Input | Control | Both | Toggles. Hold the value of the control above them (see below) |
 | IP Address | Setup | Input | Changing it reconnects |
 | Password | Setup | Input (pin off by default) | Panel PIN, substituted into the login command. Defaults to `0000` when blank. Changing it logs in again immediately |
 | Connected | Setup | Output | LED |
 | Send Raw / Last Reply | Setup | none | For testing. The login command is sent before the raw command |
 
-## Power-on defaults vs forced settings
+## Force toggles
 
-| | Forced (Properties) | Power-on defaults (Defaults page) |
+| | Force off | Force on |
 |---|---|---|
-| When applied | Always: at wake, and again whenever it drifts | Once per power-on |
-| Can users change it? | No. Controls are disabled and changes are reverted | Yes, until the next power-on |
-| Set where | Designer properties (needs a redeploy) | Runtime controls, which can be pinned or put on a UCI |
+| Control shows | What the display reports, including remote changes | The value being held |
+| Changing the control | Sends it once and confirms | Sends it, confirms, and makes it the new held value |
+| Display turns on | Nothing is changed | Held value is applied |
+| Someone changes it at the display or remote | Kept, and the control updates to match | Put back on the next poll (within the Poll Interval) |
 
-Power-on defaults apply when:
-- the display goes from standby to on, whether the plugin turned it on or someone used the IR remote (the remote case is detected on the next poll);
-- **Power On** is pressed, even if the display is already on. This makes Power On also work as "reset to defaults".
+Examples:
+- **Always come on muted at volume 0:** set Mute on and Volume to 0, then turn on Force Mute and Force Volume.
+- **Lock the lobby TVs to HDMI1:** pick HDMI1, then turn on Force Input.
 
-They aren't applied when the plugin starts (for example after a Core reboot) and finds the display already on.
+Held values are also applied when the plugin starts, for example after a Core reboot, if the display is already on. Status marks held settings, for example `On - HDMI1 (forced), muted (forced), vol 0 (forced)`.
 
-If a setting is forced, the forced value wins and the matching default control is disabled.
+The Force toggles and the controls' values are ordinary control values, so set them in Designer before you save and deploy to make them part of the design.
 
 ## Properties
 
@@ -71,14 +65,11 @@ If a setting is forced, the forced value wins and the matching default control i
 | Port | 1986 | |
 | Poll Interval (s) | 20 | How often state is checked when nothing is pending |
 | Retry Interval (s) | 6 | Time between attempts while a change is unconfirmed |
-| Max Attempts | 10 | After this many, Status shows a fault. User requests are dropped. Forced settings keep retrying once per poll interval |
+| Max Attempts | 10 | After this many, Status shows a fault. Unforced requests are dropped. Forced settings keep retrying once per poll interval |
 | Inter-Command Delay (ms) | 200 | Gap between lines sent to the panel |
 | Confirm Delay (s) | 2 | Wait after a set command before querying |
-| Audio Mode | User Control | User Control / Force Mute / Force Volume Min / Force Mute + Volume Min |
-| Volume Min / Volume Max | 0 / 100 | Fader range. "Force Volume Min" uses Volume Min |
-| Input Mode | User Selectable | User Selectable / Forced |
+| Volume Min / Volume Max | 0 / 100 | Volume fader range |
 | Input List | `HDMI1=7,HDMI2=8,DP=19,DVI=18,VGA=12,OPS=20` | `Label=Code` pairs. The label is shown in the drop-down list and matched against `GETSOURCE` replies. The code is sent with `SELECTSOURCE` |
-| Forced Input | HDMI1 | Shown when Input Mode is Forced |
 | Show Command Strings | false | Reveals the command properties below |
 | Debug Output | false | Prints TX/RX lines in the debug window |
 
@@ -106,15 +97,15 @@ If `GETSOURCE` names an input differently from your label, the plugin can't matc
 
 - **power_retry:** the panel ignores the first two power commands, and the plugin confirms on the third attempt.
 - **power_fail:** the panel never responds. The plugin sends exactly Max Attempts commands, then shows a fault.
-- **forced:**
-  - Mute, minimum volume and the forced input are applied, even when a mute reply is lost, with exactly one toggle.
-  - They're re-applied after someone changes them with the remote, and after standby and wake.
-  - User changes are ignored while forced.
+- **forced:** with all three forced (muted, volume 0, HDMI1):
+  - They're applied on power-on, even when a mute reply is lost, with exactly one toggle.
+  - A remote change is put back on the next poll.
+  - Moving a forced control changes the held value, and the new value is then held (including a forced unmute).
+  - Held values are re-applied after standby and wake.
+- **forced_boot:** held values are applied at startup when the display is already on.
+- **force_toggle:** without Force, the controls follow the display and remote changes are kept. Turning Force Input on holds the current input. Turning it off lets remote changes stand again.
 - **user:** input, volume and mute changes work, including mute retries when the panel ignores the toggle.
-- **defaults:** defaults are applied on power-on. User changes afterwards are kept across polls. Defaults are applied again after standby and a wake from the remote.
-- **defaults_boot:** defaults aren't applied when the panel is found already on at startup, but pressing Power On applies them.
 - **pin:** a wrong PIN is flagged on Status ("check PIN"). Correcting it in the text box recovers immediately, without reconnecting.
-- **defaults_with_forced_mute:** volume and input defaults apply, and forced mute overrides the mute default.
 
 Run from the repo root with Lua 5.3 or newer:
 

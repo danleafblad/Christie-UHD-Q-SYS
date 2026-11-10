@@ -4,13 +4,11 @@ local realPrint = print
 local SCENARIOS = {
   { "power_retry", { ["Debug Output"] = true } },
   { "power_fail",  {} },
-  { "forced", { ["Audio Mode"] = "Force Mute + Volume Min", ["Input Mode"] = "Forced",
-                ["Forced Input"] = "HDMI1", ["Debug Output"] = true } },
+  { "forced", { ["Debug Output"] = true } },
+  { "forced_boot", { ["Debug Output"] = true } },
+  { "force_toggle", { ["Debug Output"] = true } },
   { "user", { ["Debug Output"] = true } },
-  { "defaults", { ["Debug Output"] = true } },
-  { "defaults_boot", { ["Debug Output"] = true } },
   { "pin", { ["Debug Output"] = true } },
-  { "defaults_with_forced_mute", { ["Audio Mode"] = "Force Mute", ["Debug Output"] = true } },
 }
 
 local failures = 0
