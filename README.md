@@ -77,7 +77,7 @@ The Event Log records every change of code, so the plugin avoids changing it for
 - **Short network drops are ignored.** If the link is back within Offline Alarm Delay, the code doesn't change, and only the text says `Reconnecting`.
 - **A real outage logs two events:** Missing when the delay runs out, and OK when it's back.
 
-The Reflect device type is set to `Reflect.Types.Display` when Designer provides it. I couldn't confirm that name in QSC's documentation, so if it isn't available the field is left out. The plugin is still managed and still appears in Inventory. QSC's help says Reflect monitoring needs Q-SYS 8.2 or later and a Reflect subscription; for QSC-authored plugins it also needs a Scripting Engine feature license, and it doesn't say whether third-party plugins need one.
+The Reflect device type is set to `Reflect.Types.Display` when Designer provides it. QSC's public plugin documentation doesn't list the valid type names, so if that one isn't available the field is left out. The plugin is still managed and still appears in Inventory. QSC's help says Reflect monitoring needs Q-SYS 8.2 or later and a Reflect subscription; for QSC-authored plugins it also needs a Scripting Engine feature license, and it doesn't say whether third-party plugins need one.
 
 ## Properties
 
